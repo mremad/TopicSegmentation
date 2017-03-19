@@ -5,6 +5,7 @@ from nltk.corpus import stopwords
 from nltk.tokenize import sent_tokenize
 from nltk.stem.porter import *
 from gensim.models import word2vec
+from CorpusFeatures import CorpusFeatures
 import logging
 import numpy
 import math
@@ -20,7 +21,21 @@ import string
 #HELPERS#
 #########
 
-def load_corpus_as_vec_rep(path):
+def train_corpus_features(path):
+    corpus_feats = CorpusFeatures()
+
+    documents, sent_bnds = load_corpus_sentences(path)
+
+    corpus_feats.init_idf(documents, sent_bnds)
+
+    pickle.dump(corpus_feats,open("corpus_train_feats_idf.pckl",'w'))
+
+    return corpus_feats
+
+#Loads corpus into list of sentences#
+#Preprocessing is applied to each sentence#
+#returns: list of sentences, sentence bit boundaries#
+def load_corpus_sentences(path):
     corpus = pickle.load(open(path,'r'))
     documents = dict()
 
@@ -41,30 +56,83 @@ def load_corpus_as_vec_rep(path):
             document.append(sent)
         del document[-1]
         documents[key] = document
+    print('finished loading sentences')
+    return documents, corpus.sent_boundaries
 
+def convert_sentences_2_word_windows(documents, sent_boundaries, window):
+    word_bnds = dict()
+    documents_word = dict()
+    for key, doc in documents.iteritems():
+        bnds = sent_boundaries[key]
+        documents_word[key] = []
+        word_bnds[key] = []
+        word_window = []
+        for sent, bnd in zip(doc, bnds):
+            for id, word in enumerate(sent):
+                if len(word_window) < window:
+                    word_window.append(word)
+                else:
+                    documents_word[key].append(word_window[:])
+                    word_window = [word]
+                word_bnds[key].append(0)
+            if bnd == 1:
+                word_bnds[key][-1] = 1
+        if len(word_window) > 0:
+            documents_word[key].append(word_window[:])
+
+    return documents_word, word_bnds
+
+def load_corpus_as_word_window_vec_rep(path, train_feats, weighting, window=5):
+    documents, sent_bnds = load_corpus_sentences(path)
+
+
+    doc_window, word_bnds = convert_sentences_2_word_windows(documents, sent_bnds, window)
+
+    #Test Cases#
+    #print documents["19980304_1600_1630_CNN_HDL"][-10:]
+    #print sent_bnds["19980304_1600_1630_CNN_HDL"][-10:]
+    #print doc_window["19980304_1600_1630_CNN_HDL"][-30:]
+    #print word_bnds["19980304_1600_1630_CNN_HDL"][-30:]
+
+    #vocab = get_corpus_vocab(documents)
+    embeddings = load_embedding_vectors_with_vocab(
+        '/home/mohamed/Desktop/scripts/tdt_reader/glove.6B.50d.txt',
+        train_feats.vocab)
+
+    doc_vec_repr = convert_docs_2_vec_representations(doc_window,embeddings,train_feats,weighting)
+    del documents
+    del embeddings
+
+
+    return doc_vec_repr, word_bnds
+
+def load_corpus_as_sent_vec_rep(path, train_feats, weighting="uniform"):
+
+    documents, sent_boundaries = load_corpus_sentences(path)
 
     print('converting sentences to vector representations...')
-    vocab = get_corpus_vocab(documents)
+    #vocab = get_corpus_vocab(documents)
+
     embeddings = load_embedding_vectors_with_vocab('/home/mohamed/Desktop/scripts/tdt_reader/glove.6B.50d.txt',
-                                                   vocab)
+                                                   train_feats.vocab)
 
     #embeddings = clean_oov_embeddings_matrix(embeddings, documents)
 
-    doc_vec_repr = convert_docs_2_vec_representations(documents,embeddings)
+    doc_vec_repr = convert_docs_2_vec_representations(documents,embeddings,train_feats,weighting)
 
     del documents
     del embeddings
 
-    return doc_vec_repr, corpus.sent_boundaries
+    return doc_vec_repr, sent_boundaries
 
 def clean_corpus(corpus):
-    for i in range(len(corpus.test_set)):
-        key = corpus.test_set[i].strip()
-        corpus.test_set[i] = key
+    for i in range(len(corpus.train_set)):
+        key = corpus.train_set[i].strip()
+        corpus.train_set[i] = key
 
     num_samples = 0
     for key in corpus.text_corpus_bnds.keys():
-        if key not in corpus.test_set:
+        if key not in corpus.train_set:
             corpus.text_corpus.pop(key,None)
             corpus.text_corpus_bnds.pop(key,None)
             corpus.doc_boundaries.pop(key,None)
@@ -118,7 +186,7 @@ def load_embedding_vectors_with_vocab(path,vocab):
             embeddings[word] = numpy.array(line)
 
     print('loaded embeddings with dim: '+str(len(embeddings[embeddings.keys()[0]])))
-    print('vocab size: '+ str(len(embeddings)))
+    print('embedding vocab size: '+ str(len(embeddings)))
     return embeddings
 
 def count_oov_words(embeddings, corpus):
@@ -163,11 +231,20 @@ def get_sentence_vec_sum(sentence,embeddings):
 
     return sen_vec
 
-def get_sentence_vec(sentence,embeddings):
+def get_sentence_vec(sentence,embeddings, train_feats, weighting):
     sen_vec = []
     for word in sentence:
+        weight = 1
+
+        if weighting == "log-idf":
+            if word in train_feats.idf_feats:
+                weight = train_feats.idf_feats[word]
+
         if word in embeddings:
-            word_vec = embeddings[word]
+            word_vec = weight*embeddings[word]
+            sen_vec.append(word_vec)
+        else:
+            word_vec = [0]*len(embeddings[embeddings.keys()[0]])
             sen_vec.append(word_vec)
         #else:
         #    word_vec = [-1]*len(embeddings[embeddings.keys()[0]])
@@ -175,12 +252,12 @@ def get_sentence_vec(sentence,embeddings):
 
     return sen_vec
 
-def convert_docs_2_vec_representations(documents,embeddings):
+def convert_docs_2_vec_representations(documents,embeddings, train_feats, weighting):
     vec_representation = dict()
     for key, sentences in documents.iteritems():
         vec_document = []
         for sentence in sentences:
-            vec_document.append(get_sentence_vec(sentence,embeddings))
+            vec_document.append(get_sentence_vec(sentence,embeddings, train_feats, weighting))
 
         vec_representation[key] = vec_document
 
@@ -332,7 +409,7 @@ def get_best_segmentation_dp(segmentation_list, score_list,doc, max_length):
         k -= 1
     return segmentation
 
-def segment_dp(document):
+def segment_dp(document, window, min_seg, max_seg):
     i = 0
     j = 0
 
@@ -350,23 +427,27 @@ def segment_dp(document):
         while j < len(document):
             #print(str(j) + ' ' + str(k))
             if k == 0: #initialization
-                score = scoring_function_cvs(cum_sum,k,j)
-                score_list[j][k] = score
+                if j - k + 1 >= min_seg and i - k + 1 <= max_seg:
+                    score = scoring_function_cvs(cum_sum,k,j)
+                    score_list[j][k] = score
 
             else:
-                min_score = 0
+                max_score = float("-inf")
                 best_l = -1
                 for l in range(k-1,j):
 
+                    if (score_list[l][k-1] != None) \
+                            and (j - l + 1 + 1 >= min_seg) \
+                            and (j - l + 1 + 1 <= max_seg):
+                        score = score_list[l][k-1] + scoring_function_cvs(cum_sum,l+1,j)
 
-                    score = score_list[l][k-1] + scoring_function_cvs(cum_sum,l+1,j)
-
-                    if min_score < score:
-                        min_score = score
+                    if max_score < score:
+                        max_score = score
                         best_l = l
 
-                score_list[j][k] = min_score
-                segmentation_list[j][k] = best_l
+                if max_score != float("-inf"):
+                    score_list[j][k] = max_score
+                    segmentation_list[j][k] = best_l
             j+=1
     return score_list, segmentation_list
 
@@ -437,8 +518,8 @@ def calculate_segmentation_score(document, segmentation, segmentation_scores):
 
 def get_best_segmentation_greedy(error_diff,doc, max_length):
     #best for greedy: window=2, cutoff=5
-    print '\n'.join(['%i' % (error_diff[n]) for n in xrange(len(error_diff))])
-    print "----------"
+    #print '\n'.join(['%i' % (error_diff[n]) for n in xrange(len(error_diff))])
+    #print "----------"
     window = 5
     i = window/2
     for i in range(window/2,len(error_diff) - (window/2)):
@@ -714,6 +795,14 @@ def convert_seg_2_labels(boundary_seg):
 
     return label_seg
 
+def convert_window_labels_2_word_labels(labels_seg, doc):
+    word_labels = []
+    for label, window in zip(labels_seg, doc):
+        word_label = [label]*len(window)
+        word_labels.extend(word_label)
+
+    return word_labels
+
 def calculate_pk(ref,hyp):
 
     num_segs = ref[-1] + 1
@@ -817,7 +906,8 @@ def main_choi_corpus():
     print p_k
     print sum(p_k)/float(len(p_k))
 
-def main_segment_dp(doc_vec_repr, bnds):
+#set window= -1 for sentence segmentation#
+def main_segment_dp(doc_vec_repr, bnds, window=-1, min_seg=1, max_seg=float("inf")):
 
     pk_list = []
     max_length = 0
@@ -827,25 +917,35 @@ def main_segment_dp(doc_vec_repr, bnds):
             max_length = length
 
     for key, doc in doc_vec_repr.iteritems():
-        score_list, segmentation_list = segment_dp(doc)
+        #print key
+        score_list, segmentation_list = segment_dp(doc, window, min_seg, max_seg)
         segmentation = get_best_segmentation_dp(segmentation_list,score_list, doc, max_length)
         hyp_bnds = convert_seg_2_labels(segmentation)
+
+        if window > 0:
+            hyp_bnds = convert_window_labels_2_word_labels(hyp_bnds, doc)
+
         ref_bnds = bnds[key]
-        hyps = convert_labels_2_bounds(hyp_bnds)
+
+        #hyps = convert_labels_2_bounds(hyp_bnds)
         #print "----------"
         #print '\n'.join(['%i' % (ref_bnds[n]) for n in xrange(len(ref_bnds))])
         #print "**********"
         #print '\n'.join(['%i' % (hyps[n]) for n in xrange(len(hyps))])
         #print "----------"
+
         ref_bnds = convert_bounds_2_labels(ref_bnds)
+        #print len(hyp_bnds)
+        #print len(ref_bnds)
         pk = calculate_pk(ref_bnds, hyp_bnds)
-        #print "single %f "%pk
+
+        print "single %f "%pk
         pk_list.append(pk)
         
 
     print numpy.sum(pk_list)/float(len(pk_list))
 
-def main_segment_greedy(doc_vec_repr, bnds):
+def main_segment_greedy(doc_vec_repr, bnds, window):
     pk_list = []
     max_length = 0
     for key, doc in doc_vec_repr.iteritems():
@@ -857,21 +957,34 @@ def main_segment_greedy(doc_vec_repr, bnds):
         error_diff, segmentations = segment_greedy(doc)
         segmentation_idx = get_best_segmentation_greedy(error_diff,doc,max_length)
         hyp_bnds = convert_seg_2_labels(segmentations[segmentation_idx])
+
+        if window > 0:
+            hyp_bnds = convert_window_labels_2_word_labels(hyp_bnds, doc)
+
         ref_bnds = bnds[key]
+
+
+        hyps = convert_labels_2_bounds(hyp_bnds)
+
+        print "----------"
+        print '\n'.join(['%i' % (ref_bnds[n]) for n in xrange(len(ref_bnds))])
+        print "**********"
+        print '\n'.join(['%i' % (hyps[n]) for n in xrange(len(hyps))])
+        print "----------"
         ref_bnds = convert_bounds_2_labels(ref_bnds)
         pk = calculate_pk(ref_bnds, hyp_bnds)
-        print "single %f "%pk
+
         pk_list.append(pk)
 
     print numpy.sum(pk_list)/float(len(pk_list))
 
 def main():
     corpus = pickle.load(open("corpus_annotated_data_nltk_boundaries.pckl",'r'))
-    #corpus = clean_corpus(corpus)
-    #print len(corpus.text_corpus_bnds.keys())
-    #pickle.dump(corpus,open("corpus_test_annotated_data_nltk_boundaries.pckl",'w'))
+    corpus = clean_corpus(corpus)
+    print len(corpus.text_corpus_bnds.keys())
+    pickle.dump(corpus,open("corpus_train_annotated_data_nltk_boundaries.pckl",'w'))
 
-    #return
+    return
 
     documents = dict()
 
@@ -960,7 +1073,14 @@ def main():
 
 if __name__ == "__main__":
     #main()
-    doc_vec_repr, bnds = load_corpus_as_vec_rep("corpus_dev_10samples_annotated_data_nltk_boundaries.pckl")
+    #train_feats = train_corpus_features("corpus_train_annotated_data_nltk_boundaries.pckl")
+    train_feats = pickle.load(open("corpus_train_feats_idf.pckl",'r'))
+    window = 1
+    doc_vec_repr, bnds = load_corpus_as_word_window_vec_rep("corpus_dev_10samples_annotated_data_nltk_boundaries.pckl",
+                                                            train_feats,
+                                                            "uniform",
+                                                            window)
+    #doc_vec_repr, bnds = load_corpus_as_sent_vec_rep("corpus_dev_10samples_annotated_data_nltk_boundaries.pckl", train_feats, "uniform")
     #for cutoff in [0.1,0.25,0.5,0.75,1]:
     #    print "Cutoff (alpha): %f"%cutoff
     #    print "--------------"
@@ -973,5 +1093,6 @@ if __name__ == "__main__":
 
     #args = [5, 3, 2, 0.5, 2]
     #main_segment_window(args, doc_vec_repr, bnds)
-    main_segment_dp(doc_vec_repr, bnds)
-    #main_segment_greedy(doc_vec_repr, bnds)
+    main_segment_dp(doc_vec_repr, bnds, window,min_seg=10, max_seg=1000)
+    #main_segment_dp(doc_vec_repr, bnds, -1,min_seg=1,max_seg=100)
+    #main_segment_greedy(doc_vec_repr, bnds, window)
